@@ -5,39 +5,39 @@ import math
 from itertools import combinations
 
 # ==========================================
-# 1. 纯 yfinance 驱动：定义标普500核心股票池
+# 1. Pure yfinance Driven: Define S&P 500 Core Stock Pool
 # ==========================================
 tickers = [
-    # 科技与芯片
+    # Tech & Chips
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "AVGO", "AMD", "QCOM", "CRM", "CSCO",
-    # 消费、零售与饮料
+    # Consumer, Retail & Beverage
     "KO", "PEP", "WMT", "COST", "PG", "HD", "MCD", "NKE",
-    # 金融与银行
+    # Finance & Banking
     "JPM", "BAC", "WFC", "GS", "MS", "V", "MA",
-    # 工业、能源与医药
+    # Industrials, Energy & Healthcare
     "GE", "CAT", "HON", "BA", "XOM", "CVX", "JNJ", "PFE", "MRK", "UNH"
 ]
 
-print(f"🚀 初始化股票池，共 {len(tickers)} 只股票。开始下载 2006-2026 完整数据...")
+print(f"🚀 Initializing stock pool with {len(tickers)} stocks. Starting download for full 2006-2026 data...")
 raw_data = yf.download(tickers, start="2006-01-01", end="2026-06-01", auto_adjust=False)
 price_df = raw_data['Adj Close'].copy()
 
-# 清洗数据
+# Data Cleaning
 price_df = price_df.dropna(thresh=int(len(price_df) * 0.8), axis=1)
 price_df = price_df.ffill().bfill()
 valid_tickers = price_df.columns.tolist()
-print(f"📊 数据清洗完成，有效股票共 {len(valid_tickers)} 只。")
+print(f"📊 Data cleaning complete. Total valid stocks: {len(valid_tickers)}.")
 
 # ==========================================
-# 2. 划分数据集
+# 2. Split Dataset
 # ==========================================
 train_prices = price_df.loc['2006-01-01':'2015-12-31'].copy()
 test_prices = price_df.loc['2016-01-01':'2026-06-01'].copy()
 
 # ==========================================
-# 3. 在 [前10年训练集] 中筛选皮尔逊相关系数 > 0.7 的组合
+# 3. Filter Pairs with Pearson Correlation > 0.7 in [First 10 Years Training Set]
 # ==========================================
-print("\n🔍 正在计算前10年（2006-2015）的历史皮尔逊相关系数...")
+print("\n🔍 Calculating historical Pearson correlation for the first 10 years (2006-2015)...")
 train_returns = train_prices.pct_change().dropna()
 corr_matrix = train_returns.corr(method='pearson')
 
@@ -49,10 +49,10 @@ for s1, s2 in pairs:
     if r_val >= 0.7:
         selected_pairs.append((s1, s2, r_val))
 
-print(f"🎯 成功筛选出 {len(selected_pairs)} 组在前10年相关系数 > 0.7 的高相关股票对。")
+print(f"🎯 Successfully screened {len(selected_pairs)} highly correlated stock pairs with correlation coefficient > 0.7 in the training set.")
 
 # ==========================================
-# 4. 封装通用回测函数
+# 4. Encapsulate General Backtesting Function
 # ==========================================
 initial_capital = 10000.0
 
@@ -107,7 +107,7 @@ def run_backtest(df_prices, stock_A, stock_B, multiplier, mean_ratio, sigma):
     return portfolio_values, trade_count
 
 # ==========================================
-# 5. 核心双重循环回测
+# 5. Core Double-Loop Backtesting
 # ==========================================
 multipliers_to_test = np.arange(0.1, 3.1, 0.1) 
 backtest_results = []
@@ -152,32 +152,32 @@ for stockA, stockB, corr_score in selected_pairs:
 results_df = pd.DataFrame(backtest_results)
 results_df = results_df.sort_values(by="Strat_Return(%)", ascending=False).reset_index(drop=True)
 
-print("\n============ 🏆 策略自适应寻优套利排行榜 (2016-2026) ============")
+print("\n============ 🏆 Adaptive Optimization Strategy Arbitrage Leaderboard (2016-2026) ============")
 print(results_df.to_string())
 
 
 # ==========================================
-# 6. 【纯手工实现】：无外部库依赖的统计检验模块
+# 6. [Pure Manual Implementation]: Statistical Hypothesis Testing Module without External Libraries
 # ==========================================
 def normal_cdf(x):
-    """标准正态分布的累积分布函数(CDF)"""
+    """Cumulative Distribution Function (CDF) for standard normal distribution"""
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 def student_t_cdf_approx(t, df):
     """
-    使用 Wallace (1959) 近似公式计算学生t分布的累积分布
-    大样本(df > 30)时极其精准，完全满足金融回测报告需求
+    Approximates the Student's t-distribution CDF using Wallace (1959) formula.
+    Extremely accurate for large samples (df > 30), fully meeting requirements for financial backtesting reports.
     """
     if df <= 0:
         return 0.5
-    # 转化为正态分布近似变量 Z
+    # Convert to normal approximation variable Z
     z = math.sqrt(df * math.log(1.0 + (t**2) / df))
     if t < 0:
         z = -z
     return normal_cdf(z)
 
 print("\n" + "="*50)
-print("🔬 开始运行统计学显著性检验 (底层公式原生实现)...")
+print("🔬 Running Statistical Significance Test (Native Formula Implementation)...")
 print("="*50)
 
 total_pairs = len(results_df)
@@ -186,61 +186,61 @@ if total_pairs > 1:
     successful_pairs = int(np.sum(results_df['Alpha(%)'] > 0))
     win_rate = successful_pairs / total_pairs
     
-    print(f"📊 基础统计描述:")
-    print(f"  - 总测试组合数 (N): {total_pairs} 组")
-    print(f"  - 成功跑赢基准的组合数: {successful_pairs} 组")
-    print(f"  - 组合层面的胜率 (Win Rate): {win_rate * 100:.2f}%")
-    print(f"  - 策略平均收益率: {results_df['Strat_Return(%)'].mean():.2f}%")
-    print(f"  - 基准平均收益率: {results_df['B&H_Return(%)'].mean():.2f}%")
-    print(f"  - 平均超额收益 (Average Alpha): {results_df['Alpha(%)'].mean():.2f}%\n")
+    print(f"📊 Basic Descriptive Statistics:")
+    print(f"  - Total Tested Pairs (N): {total_pairs} pairs")
+    print(f"  - Number of Pairs Outperforming Benchmark: {successful_pairs} pairs")
+    print(f"  - Pair-level Win Rate: {win_rate * 100:.2f}%")
+    print(f"  - Average Strategy Return: {results_df['Strat_Return(%)'].mean():.2f}%")
+    print(f"  - Average Benchmark Return: {results_df['B&H_Return(%)'].mean():.2f}%")
+    print(f"  - Average Excess Return (Average Alpha): {results_df['Alpha(%)'].mean():.2f}%\n")
 
     # ------------------------------------------
-    # 检验一：单侧比例 Z 检验公式手动实现
+    # Test 1: Manual Implementation of One-Sided Proportion Z-Test Formula
     # ------------------------------------------
     p_0 = 0.5
-    # 防止分母为0
+    # Prevent division by zero
     se_z = math.sqrt((p_0 * (1 - p_0)) / total_pairs)
     stat_z = (win_rate - p_0) / se_z
-    # 单侧右尾检验 P-value
+    # One-sided right-tailed P-value
     p_val_z = 1.0 - normal_cdf(stat_z)
     
-    print(f"1️⃣ 【单侧比例 Z 检验 (Proportion Z-Test)】:")
-    print(f"  - 假设 H0: 策略战胜大盘的概率 p <= 0.5 (策略纯靠运气)")
-    print(f"  - 假设 Ha: 策略战胜大盘的概率 p > 0.5 (策略具备真本事)")
-    print(f"  - Z 统计量 (Z-Score): {stat_z:.4f}")
-    print(f"  - P 值 (P-Value): {p_val_z:.6f}")
+    print(f"1️⃣ [One-Sided Proportion Z-Test]:")
+    print(f"  - Hypothesis H0: Probability of outperforming the market p <= 0.5 (Strategy relies purely on luck)")
+    print(f"  - Hypothesis Ha: Probability of outperforming the market p > 0.5 (Strategy possesses genuine edge)")
+    print(f"  - Z-Score: {stat_z:.4f}")
+    print(f"  - P-Value: {p_val_z:.6f}")
     if p_val_z < 0.05:
-        print(f"  📢 结论: 拒绝原假设 H0！P值小于 0.05，策略【具有显著的获利统计优势】。")
+        print(f"  📢 Conclusion: Reject the null hypothesis H0! P-value is less than 0.05, the strategy has a [significant statistical advantage in profitability].")
     else:
-        print(f"  📢 结论: 无法拒绝原假设 H0。P值大于 0.05，尚不能证明策略不是靠运气。")
+        print(f"  📢 Conclusion: Fail to reject the null hypothesis H0. P-value is greater than 0.05, cannot prove the strategy is not driven by luck.")
         
     print("\n" + "-"*40)
 
     # ------------------------------------------
-    # 检验二：配对样本 t 检验公式手动实现
+    # Test 2: Manual Implementation of Paired Samples t-Test Formula
     # ------------------------------------------
-    # 计算配对差值
+    # Calculate paired differences
     diff = results_df['Strat_Return(%)'] - results_df['B&H_Return(%)']
     mean_diff = diff.mean()
-    # 手动算样本标准差 (ddof=1)
+    # Manually calculate sample standard deviation (ddof=1)
     std_diff = diff.std(ddof=1)
     
     df_t = total_pairs - 1
     se_t = std_diff / math.sqrt(total_pairs)
     stat_t = mean_diff / se_t
     
-    # 计算双尾 P-value
+    # Calculate two-tailed P-value
     p_val_t = 2.0 * (1.0 - student_t_cdf_approx(abs(stat_t), df_t))
     
-    print(f"2️⃣ 【配对样本 t 检验 (Paired t-Test)】:")
-    print(f"  - 假设 H0: 策略总体收益率与买入持有基准无异 (均值差 = 0)")
-    print(f"  - 假设 Ha: 策略总体收益率与买入持有基准存在显著差异")
-    print(f"  - 自由度 (df): {df_t}")
-    print(f"  - t 统计量 (t-Statistic): {stat_t:.4f}")
-    print(f"  - P 值 (P-Value): {p_val_t:.6f}")
+    print(f"2️⃣ [Paired Samples t-Test]:")
+    print(f"  - Hypothesis H0: The overall strategy return is identical to the Buy & Hold benchmark (Mean difference = 0)")
+    print(f"  - Hypothesis Ha: The overall strategy return is significantly different from the Buy & Hold benchmark")
+    print(f"  - Degrees of Freedom (df): {df_t}")
+    print(f"  - t-Statistic: {stat_t:.4f}")
+    print(f"  - P-Value: {p_val_t:.6f}")
     if p_val_t < 0.05:
-        print(f"  📢 结论: 拒绝原假设 H0！P值小于 0.05，策略带来的超额回报【在统计学上是显著的】。")
+        print(f"  📢 Conclusion: Reject the null hypothesis H0! P-value is less than 0.05, the excess returns generated by the strategy are [statistically significant].")
     else:
-        print(f"  📢 结论: 无法拒绝原假设 H0。P值大于 0.05，策略差距在统计上未达到显著水平。")
+        print(f"  📢 Conclusion: Fail to reject the null hypothesis H0. P-value is greater than 0.05, the performance gap is not statistically significant.")
 else:
-    print("❌ 样本组合数过少（少于2组），无法进行统计学显著性检验。")
+    print("❌ Sample size is too small (less than 2 pairs) to perform statistical significance tests.")

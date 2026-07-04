@@ -4,45 +4,45 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # ==========================================
-# 1. 下载数据 (2006 - 2026)
+# 1. Download Data (2006 - 2026)
 # ==========================================
-print("正在下载 KO 和 PEP 的数据...")
+print("Downloading data for KO and PEP...")
 tickers = ["KO", "PEP"]
 raw_data = yf.download(tickers, start="2006-01-01", end="2026-06-01", auto_adjust=False)
 data = raw_data['Adj Close'].copy()
 
-# 计算价格比例 Ratio = KO / PEP
+# Calculate price ratio: Ratio = KO / PEP
 data['Ratio'] = data['KO'] / data['PEP']
 
 # ==========================================
-# 2. 划分数据集
+# 2. Split Dataset
 # ==========================================
 train_data = data.loc['2006-01-01':'2015-12-31'].copy()
 test_data = data.loc['2016-01-01':'2026-06-01'].copy()
 
 # ==========================================
-# 3. 使用 [训练集] 计算历史指标
+# 3. Calculate Historical Metrics Using [Training Set]
 # ==========================================
 mean_ratio = train_data['Ratio'].mean()
 train_pct_dev = (train_data['Ratio'] - mean_ratio) / mean_ratio * 100
 std_dev = train_pct_dev.std()
 
-print(f"\n--- 训练集 (2006-2016) 统计指标 ---")
-print(f"历史平均比例 (Mean Ratio): {mean_ratio:.4f}")
-print(f"偏差值的标准差 (Sigma): {std_dev:.2f}%\n")
+print(f"\n--- Training Set (2006-2016) Statistics ---")
+print(f"Historical Mean Ratio: {mean_ratio:.4f}")
+print(f"Standard Deviation of Deviation (Sigma): {std_dev:.2f}%\n")
 
-# 计算 [测试集] 上的每日百分比偏差
+# Calculate daily percentage deviation on [Test Set]
 test_data['Pct_Dev'] = (test_data['Ratio'] - mean_ratio) / mean_ratio * 100
 
 # ==========================================
-# 4. 初始化基准与参数
+# 4. Initialize Benchmarks and Parameters
 # ==========================================
 first_day_ko = test_data['KO'].iloc[0]
 first_day_pep = test_data['PEP'].iloc[0]
 initial_capital = 10000.0
 results = {}
 
-# 4.1 计算 [买入持有 (Buy & Hold) 基准]
+# 4.1 Calculate [Buy & Hold Benchmark]
 bh_values = []
 for _, row in test_data.iterrows():
     bh_val = (initial_capital * 0.5 / first_day_ko) * row['KO'] + (initial_capital * 0.5 / first_day_pep) * row['PEP']
@@ -50,26 +50,26 @@ for _, row in test_data.iterrows():
 results['Buy & Hold'] = bh_values
 
 # ==========================================
-# 5. 阶梯式触发套利回测
+# 5. Stepped Trigger Arbitrage Backtesting
 # ==========================================
-# 按照教授白板上的设计，我们定义两级阈值乘数
-t1 = 1.0  # 第一级：轻度失调触发线
-t2 = 2.0  # 第二级：极度失调加码线
+# Define two levels of threshold multipliers based on the professor's whiteboard design
+t1 = 1.0  # Level 1: Mild imbalance trigger line
+t2 = 2.0  # Level 2: Extreme imbalance scale-in line
 
 threshold_1 = t1 * std_dev
 threshold_2 = t2 * std_dev
 
-# 策略初始化
+# Strategy initialization
 cash = 0.0
 ko_shares = (initial_capital * 0.5) / first_day_ko
 pep_shares = (initial_capital * 0.5) / first_day_pep
 
-# trade_status 状态机扩展：
-#  0: 基础持仓 (50/50)
-# -1: 第一级突破(KO贵) -> 持仓变 25/75 (轻度多PEP)
-# -2: 第二级严重突破 -> 持仓变 0/100  (极端全仓PEP)
-#  1: 第一级跌破(PEP贵) -> 持仓变 75/25 (轻度多KO)
-#  2: 第二级严重跌破 -> 持仓变 100/0  (极端全仓KO)
+# trade_status state machine expansion:
+#  0: Base position (50/50)
+# -1: Level 1 breakout (KO overvalued) -> Position shifts to 25/75 (Mildly overweight PEP)
+# -2: Level 2 severe breakout -> Position shifts to 0/100 (Extremely full-position PEP)
+#  1: Level 1 breakdown (PEP overvalued) -> Position shifts to 75/25 (Mildly overweight KO)
+#  2: Level 2 severe breakdown -> Position shifts to 100/0 (Extremely full-position KO)
 trade_status = 0 
 
 portfolio_values = []
@@ -80,20 +80,20 @@ for date, row in test_data.iterrows():
     ko_price = row['KO']
     pep_price = row['PEP']
     
-    # 实时计算当前账户总价值
+    # Calculate current total portfolio value in real-time
     current_val = cash + (ko_shares * ko_price) + (pep_shares * pep_price)
     portfolio_values.append(current_val)
     
-    # --- 阶梯状态机核心控制逻辑 ---
+    # --- Stepped State Machine Core Control Logic ---
     if trade_status == 0:
-        # 突破正向一级线 -> KO贵了，调仓为 25% KO + 75% PEP
+        # Breakout above positive Level 1 line -> KO is expensive, rebalance to 25% KO + 75% PEP
         if pct_dev >= threshold_1 and pct_dev < threshold_2:
             trade_status = -1
             ko_shares = (current_val * 0.25) / ko_price
             pep_shares = (current_val * 0.75) / pep_price
             cash = current_val - (ko_shares * ko_price) - (pep_shares * pep_price)
             trade_count += 1
-        # 强势直接突破二级线 -> 极为罕见，若发生直接跳级全仓 PEP
+        # Strong breakout directly above Level 2 line -> Extremely rare, if occurs, skip directly to full-position PEP
         elif pct_dev >= threshold_2:
             trade_status = -2
             ko_shares = 0.0
@@ -101,14 +101,14 @@ for date, row in test_data.iterrows():
             cash = current_val - (pep_shares * pep_price)
             trade_count += 1
             
-        # 跌破负向一级线 -> PEP贵了，调仓为 75% KO + 25% PEP
+        # Breakdown below negative Level 1 line -> PEP is expensive, rebalance to 75% KO + 25% PEP
         elif pct_dev <= -threshold_1 and pct_dev > -threshold_2:
             trade_status = 1
             ko_shares = (current_val * 0.75) / ko_price
             pep_shares = (current_val * 0.25) / pep_price
             cash = current_val - (ko_shares * ko_price) - (pep_shares * pep_price)
             trade_count += 1
-        # 直接跌破二级线 -> 直接跳级全仓 KO
+        # Direct breakdown below Level 2 line -> Skip directly to full-position KO
         elif pct_dev <= -threshold_2:
             trade_status = 2
             ko_shares = current_val / ko_price
@@ -117,14 +117,14 @@ for date, row in test_data.iterrows():
             trade_count += 1
 
     elif trade_status == -1:
-        # 情况A：已经在第一级(25/75)，偏差继续恶化冲破二级线 -> 加码全仓 PEP
+        # Case A: Already at Level 1 (25/75), deviation worsens and breaks Level 2 -> Scale-in to full-position PEP
         if pct_dev >= threshold_2:
             trade_status = -2
             ko_shares = 0.0
             pep_shares = current_val / pep_price
             cash = current_val - (pep_shares * pep_price)
             trade_count += 1
-        # 情况B：开始均值回归，跌回 0 轴以下 -> 获利平仓，恢复 50/50
+        # Case B: Mean reversion starts, drops back below the 0-axis -> Close profitable trades, revert to 50/50
         elif pct_dev <= 0:
             trade_status = 0
             ko_shares = (current_val * 0.5) / ko_price
@@ -132,7 +132,7 @@ for date, row in test_data.iterrows():
             cash = current_val - (ko_shares * ko_price) - (pep_shares * pep_price)
 
     elif trade_status == -2:
-        # 已经处于极端全仓 PEP 状态，只能等待它彻底回归 0 轴平仓
+        # Already in extreme full-position PEP state, wait for complete reversion to 0-axis to close position
         if pct_dev <= 0:
             trade_status = 0
             ko_shares = (current_val * 0.5) / ko_price
@@ -140,14 +140,14 @@ for date, row in test_data.iterrows():
             cash = current_val - (ko_shares * ko_price) - (pep_shares * pep_price)
 
     elif trade_status == 1:
-        # 情况A：在负向一级，继续恶化跌破二级线 -> 加码全仓 KO
+        # Case A: At negative Level 1, deviation worsens and breaks below Level 2 -> Scale-in to full-position KO
         if pct_dev <= -threshold_2:
             trade_status = 2
             ko_shares = current_val / ko_price
             pep_shares = 0.0
             cash = current_val - (ko_shares * ko_price)
             trade_count += 1
-        # 情况B：向0轴回归，涨回 0 轴以上 -> 平仓恢复 50/50
+        # Case B: Reverting to 0-axis, rises back above the 0-axis -> Close position and revert to 50/50
         elif pct_dev >= 0:
             trade_status = 0
             ko_shares = (current_val * 0.5) / ko_price
@@ -155,7 +155,7 @@ for date, row in test_data.iterrows():
             cash = current_val - (ko_shares * ko_price) - (pep_shares * pep_price)
 
     elif trade_status == 2:
-        # 已经处于极端全仓 KO 状态，等待彻底回归 0 轴平仓
+        # Already in extreme full-position KO state, wait for complete reversion to 0-axis to close position
         if pct_dev >= 0:
             trade_status = 0
             ko_shares = (current_val * 0.5) / ko_price
@@ -166,16 +166,16 @@ strategy_label = f"Stepped Arbitrage ({t1}σ & {t2}σ)"
 results[strategy_label] = portfolio_values
 
 # ==========================================
-# 6. 输出结果与绘图
+# 6. Output Results and Plotting
 # ==========================================
 final_portfolio_value = portfolio_values[-1]
 final_return = (final_portfolio_value - initial_capital) / initial_capital * 100
-print(f"📈 阶梯式套利策略 | 最终总资产: ${final_portfolio_value:,.2f} | 总收益率: {final_return:.2f}% | 调仓/加仓触发次数: {trade_count} 次")
+print(f"📈 Stepped Arbitrage Strategy | Final Portfolio Value: ${final_portfolio_value:,.2f} | Total Return: {final_return:.2f}% | Rebalancing Triggers: {trade_count} times")
 
 bh_final_value = bh_values[-1]
 bh_return = (bh_final_value - initial_capital) / initial_capital * 100
-print(f"📊 买入持有基准   | 最终总资产: ${bh_final_value:,.2f} | 总收益率: {bh_return:.2f}%")
-print(f"🏆 阶梯策略 Alpha | {final_return - bh_return:.2f}%")
+print(f"📊 Buy & Hold Benchmark       | Final Portfolio Value: ${bh_final_value:,.2f} | Total Return: {bh_return:.2f}%")
+print(f"🏆 Stepped Strategy Alpha     | {final_return - bh_return:.2f}%")
 
 plt.figure(figsize=(14, 7))
 combined_df = pd.DataFrame(results, index=test_data.index)

@@ -2,61 +2,79 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from statsmodels.tsa.stattools import adfuller
 
-# 1. 下载数据 (2006 - 2026)
-print("正在下载 KO 和 PEP 的数据...")
+# 1. Download Data (2006 - 2026)
+print("Downloading data for KO and PEP...")
 tickers = ["KO", "PEP"]
-# 注意：2026年数据请确保能获取到
 raw_data = yf.download(tickers, start="2006-01-01", end="2026-06-01", auto_adjust=False)
 data = raw_data['Adj Close'].copy()
 
-# 计算价格比例 Ratio = KO / PEP
+# Calculate the price ratio: Ratio = KO / PEP
 data['Ratio'] = data['KO'] / data['PEP']
 
-# 2. 划分数据集
+# 2. Split Dataset
 train_data = data.loc['2006-01-01':'2015-12-31'].copy()
 test_data = data.loc['2016-01-01':'2026-06-01'].copy()
 
-# 3. 使用 [训练集] 计算历史指标
+# 3. Calculate Historical Metrics Using [Training Set]
 mean_ratio = train_data['Ratio'].mean()
 train_pct_dev = (train_data['Ratio'] - mean_ratio) / mean_ratio * 100
 std_dev = train_pct_dev.std()
 
-print(f"\n--- 训练集 (2006-2016) 统计指标 ---")
-print(f"历史平均比例 (Mean Ratio): {mean_ratio:.4f}")
-print(f"偏差值的标准差 (Sigma): {std_dev:.2f}%\n")
+print(f"\n--- Training Set (2006-2016) Statistics ---")
+print(f"Historical Mean Ratio: {mean_ratio:.4f}")
+print(f"Standard Deviation of Deviation (Sigma): {std_dev:.2f}%\n")
 
-# 4. 计算 [测试集] 上的每日百分比偏差
+# ==========================================
+# New: Perform ADF Stationarity Test on Training Set Percentage Deviation Series
+# ==========================================
+print("Performing ADF stationarity test on training set percentage deviation (train_pct_dev)...")
+adf_result = adfuller(train_pct_dev.dropna())
+
+print(f"   ADF Test Statistic: {adf_result[0]:.4f}")
+print(f"   p-value: {adf_result[1]:.4f}")
+print(f"   Critical Value at 5% Significance Level: {adf_result[4]['5%']:.4f}")
+
+# Double verification: p-value < 0.05 AND Test Statistic < 5% Critical Value
+if adf_result[1] < 0.05 and adf_result[0] < adf_result[4]['5%']:
+    print("[ADF Conclusion]: Reject the null hypothesis. The percentage deviation series is [STATIONARY].")
+    print("                 This implies the price ratio exhibits mean-reverting properties, and pairs trading can be safely executed.")
+else:
+    print("[ADF Conclusion]: Fail to reject the null hypothesis. The percentage deviation series is [NON-STATIONARY].")
+    print("                 ⚠️ WARNING: The series may contain a trend or random walk. Pairs trading faces risks of non-mean reversion.")
+print("-" * 60 + "\n")
+
+
+# 4. Calculate Daily Percentage Deviation on [Test Set]
 test_data['Pct_Dev'] = (test_data['Ratio'] - mean_ratio) / mean_ratio * 100
 
-# 5. 定义多个标准差阈值进行对比
+# 5. Define Multiple Standard Deviation Thresholds for Comparison
 threshold_multipliers = [0.5, 1.0, 1.5, 2.0]
 results = {}
 
-# 获取第一天价格用于初始化
+# Get the first day's prices for initialization
 first_day_ko = test_data['KO'].iloc[0]
 first_day_pep = test_data['PEP'].iloc[0]
 initial_capital = 10000.0
 
-# 5.1 计算 [买入持有 (Buy & Hold) 基准] 的每日价值
+# 5.1 Calculate Daily Value of the [Buy & Hold Benchmark]
 bh_values = []
 for _, row in test_data.iterrows():
-    # 初始10000刀，一半买KO，一半买PEP，之后一直持有
     bh_val = (initial_capital * 0.5 / first_day_ko) * row['KO'] + (initial_capital * 0.5 / first_day_pep) * row['PEP']
     bh_values.append(bh_val)
 results['Buy & Hold'] = bh_values
 
-# 5.2 循环每个标准差阈值组合进行独立回测
+# 5.2 Loop through each standard deviation threshold combination for independent backtesting
 for m in threshold_multipliers:
     current_threshold = m * std_dev
     
-    # 策略初始化：一开始10000刀，一半买KO，一半买PEP
+    # Strategy initialization
     cash = 0.0
     ko_shares = (initial_capital * 0.5) / first_day_ko
     pep_shares = (initial_capital * 0.5) / first_day_pep
     
-    # trade_status 状态机: 
-    # 0: 基础仓位 (50/50), 1: 全仓 KO (100/0), -1: 全仓 PEP (0/100)
+    # trade_status state machine
     trade_status = 0 
     
     portfolio_values = []
@@ -67,20 +85,17 @@ for m in threshold_multipliers:
         ko_price = row['KO']
         pep_price = row['PEP']
         
-        # 实时计算当前总资产：现金 + 持有KO价值 + 持有PEP价值
         current_val = cash + (ko_shares * ko_price) + (pep_shares * pep_price)
         portfolio_values.append(current_val)
         
-        # 核心全仓轮动逻辑
+        # Core all-in rotation logic
         if trade_status == 0:
-            # 1. 偏差值过大 -> 说明 KO 相对贵了，PEP 便宜了：卖掉所有 KO，全仓 PEP
             if pct_dev >= current_threshold:
                 trade_status = -1
                 ko_shares = 0.0
                 pep_shares = current_val / pep_price
                 cash = current_val - (pep_shares * pep_price)
                 trade_count += 1
-            # 2. 偏差值负数过于小 -> 说明 PEP 相对贵了，KO 便宜了：卖掉所有 PEP，全仓 KO
             elif pct_dev <= -current_threshold:
                 trade_status = 1
                 ko_shares = current_val / ko_price
@@ -89,38 +104,33 @@ for m in threshold_multipliers:
                 trade_count += 1
                 
         elif trade_status == -1:
-            # 之前全仓了 PEP，现在等待偏差值回归 0 (从正数跌回 <= 0)
             if pct_dev <= 0:
-                # 结束交易：用全部资产重新按 50% / 50% 比例购买 KO 和 PEP
                 ko_shares = (current_val * 0.5) / ko_price
                 pep_shares = (current_val * 0.5) / pep_price
                 cash = current_val - (ko_shares * ko_price) - (pep_shares * pep_price)
-                trade_status = 0 # 重新回到等待触发状态
+                trade_status = 0
                 
         elif trade_status == 1:
-            # 之前全仓了 KO，现在等待偏差值回归 0 (从负数涨回 >= 0)
             if pct_dev >= 0:
-                # 结束交易：用全部资产重新按 50% / 50% 比例购买 KO 和 PEP
                 ko_shares = (current_val * 0.5) / ko_price
                 pep_shares = (current_val * 0.5) / pep_price
                 cash = current_val - (ko_shares * ko_price) - (pep_shares * pep_price)
-                trade_status = 0 # 重新回到等待触发状态
+                trade_status = 0
                 
     strategy_label = f"Arbitrage ({m}σ)"
     results[strategy_label] = portfolio_values
     
-    # 结尾计算总资产和总收益率（用最后一天包含全部股票价值的 portfolio_values[-1]）
     final_portfolio_value = portfolio_values[-1]
     final_return = (final_portfolio_value - initial_capital) / initial_capital * 100
-    print(f"📈 策略 {m:>.1f}σ 组 | 最终总资产: ${final_portfolio_value:,.2f} | 总收益率: {final_return:.2f}% | 触发交易次数: {trade_count} 次")
+    print(f"📈 Strategy {m:>.1f}σ | Final Value: ${final_portfolio_value:,.2f} | Total Return: {final_return:.2f}% | Trades Triggered: {trade_count} times")
 
-# 打印买入持有基准的结果
+# Print results for the Buy & Hold benchmark
 bh_final_value = bh_values[-1]
 bh_return = (bh_final_value - initial_capital) / initial_capital * 100
-print(f"📊 买入持有基准  | 最终总资产: ${bh_final_value:,.2f} | 总收益率: {bh_return:.2f}%")
+print(f"📊 Buy & Hold Bm  | Final Value: ${bh_final_value:,.2f} | Total Return: {bh_return:.2f}%")
 
 # ==========================================
-# 6. 绘图对比
+# 6. Plotting and Comparison
 # ==========================================
 plt.figure(figsize=(14, 7))
 

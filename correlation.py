@@ -4,63 +4,63 @@ import numpy as np
 from itertools import combinations
 
 # ==========================================
-# 1. 纯粹由 yfinance 驱动的股票池定义 (标普500核心成分股)
+# 1. Stock Pool Definition Driven Purely by yfinance (Core S&P 500 Components)
 # ==========================================
-# 这里精选了标普500各板块的龙头，完全不需要从维基百科爬取
+# Leading stocks from various S&P 500 sectors are selected here, eliminating the need to scrape Wikipedia.
 tickers = [
-    # 科技与芯片
+    # Tech & Chips
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "AVGO", "AMD", "INTC", "QCOM", "CRM", "ORCL", "CSCO", "ADBE",
-    # 消费、饮料与零售
+    # Consumer, Beverages & Retail
     "KO", "PEP", "WMT", "COST", "PG", "HD", "MCD", "NKE", "SBUX", "EL", "CL", "PM", "MO",
-    # 金融与银行
+    # Finance & Banking
     "JPM", "BAC", "WFC", "C", "GS", "MS", "AXP", "V", "MA", "BLK", "SPGI",
-    # 医药与健康
+    # Healthcare & Pharma
     "JNJ", "PFE", "MRK", "ABBV", "BMY", "LLY", "UNH", "CVS", "TMO", "AMGN", "ISRG",
-    # 工业、制造与航空
+    # Industrials, Manufacturing & Aerospace
     "GE", "MMM", "CAT", "HON", "LMT", "BA", "UPS", "FDX", "DE", "EMR",
-    # 能源与材料
+    # Energy & Materials
     "XOM", "CVX", "COP", "SLB", "EOG", "LIN", "APD", "FCX", "NUE",
-    # 电信与公用事业
+    # Telecom & Utilities
     "T", "VZ", "TMUS", "NEE", "DUK", "SO", "AEP",
-    # 汽车与娱乐
+    # Auto & Entertainment
     "TSLA", "F", "GM", "DIS", "NFLX", "CMCSA"
 ]
 
-print(f"自定义标普500核心股票池初始化完成，共 {len(tickers)} 只股票。")
+print(f"Custom S&P 500 core stock pool initialized with {len(tickers)} tickers.")
 
 # ==========================================
-# 2. 纯粹使用 yfinance 下载历史价格数据 (2024 - 2026)
+# 2. Download Historical Price Data Purely Using yfinance (2024 - 2026)
 # ==========================================
 start_date = "2024-06-01"
 end_date = "2026-06-01"
-print(f"正在通过 yfinance 下载从 {start_date} 到 {end_date} 的收盘价数据...")
+print(f"Downloading Adjusted Close price data via yfinance from {start_date} to {end_date}...")
 
-# yf.download 会直接向 Yahoo Finance 发起请求并下载数据
+# yf.download will fetch and download data directly from Yahoo Finance
 raw_data = yf.download(tickers, start=start_date, end=end_date, auto_adjust=False)
 price_df = raw_data['Adj Close'].copy()
 
-# 清洗数据：剔除有缺失值的日期或股票
-price_df = price_df.dropna(axis=1, how='all') # 剔除全空的列
-price_df = price_df.ffill().bfill()            # 前向/后向填充个别交易日空缺
+# Data Cleaning: Remove dates or tickers with missing values
+price_df = price_df.dropna(axis=1, how='all') # Drop entirely empty columns
+price_df = price_df.ffill().bfill()            # Forward/backward fill occasional missing trading days
 
-print(f"yfinance 数据下载并清洗完毕。实际参与计算的股票数量: {price_df.shape[1]} 只。")
+print(f"yfinance data download and cleaning complete. Number of tickers actually used in calculation: {price_df.shape[1]}.")
 
 # ==========================================
-# 3. 计算每日收益率 (Returns)
+# 3. Calculate Daily Returns
 # ==========================================
-# 计算百分比变动，因为皮尔逊相关性必须基于收益率
+# Calculate percentage changes, as Pearson correlation must be based on returns
 returns_df = price_df.pct_change().dropna()
 
 # ==========================================
-# 4. 计算皮尔逊相关系数矩阵
+# 4. Calculate Pearson Correlation Matrix
 # ==========================================
-print("正在计算皮尔逊相关系数大表...")
+print("Calculating the Pearson correlation matrix...")
 corr_matrix = returns_df.corr(method='pearson')
 
 # ==========================================
-# 5. 穷举组合并筛选相关系数 > 0.7 的股票对
+# 5. Exhaustive Combination and Filtering of Stock Pairs with Correlation > 0.7
 # ==========================================
-print("正在穷举两两组合，筛选相关系数 >= 0.7 的高相关组合...")
+print("Iterating through pairwise combinations to filter high correlation pairs with coefficient >= 0.7...")
 valid_tickers = corr_matrix.columns
 pairs = list(combinations(valid_tickers, 2))
 
@@ -74,18 +74,18 @@ for stockA, stockB in pairs:
             'Correlation': score
         })
 
-# 转化为 DataFrame 并按相关性从高到低排序
+# Convert to DataFrame and sort by correlation in descending order
 high_corr_df = pd.DataFrame(results)
 if not high_corr_df.empty:
     high_corr_df = high_corr_df.sort_values(by='Correlation', ascending=False).reset_index(drop=True)
 
 # ==========================================
-# 6. 输出结果
+# 6. Output Results
 # ==========================================
-print(f"\n寻找完毕！在当前股票池中，共找到 {len(high_corr_df)} 组相关系数大于 0.7 的组合。\n")
+print(f"\nSearch complete! Found {len(high_corr_df)} pairs with a correlation coefficient greater than 0.7 in the current stock pool.\n")
 
 if not high_corr_df.empty:
-    print("--- 相关性最高的前 20 组股票对 ---")
+    print("--- Top 20 Stock Pairs with Highest Correlation ---")
     print(high_corr_df.head(20).to_string())
 else:
-    print("未找到相关系数大于 0.7 的股票对。")
+    print("No stock pairs found with a correlation coefficient greater than 0.7.")
