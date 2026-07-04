@@ -1,0 +1,194 @@
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ==========================================
+# 1. 下载数据 (2006 - 2026)
+# ==========================================
+print("正在下载 KO 和 PEP 的数据...")
+tickers = ["KO", "PEP"]
+raw_data = yf.download(tickers, start="2006-01-01", end="2026-06-01", auto_adjust=False)
+data = raw_data['Adj Close'].copy()
+
+# 计算价格比例 Ratio = KO / PEP
+data['Ratio'] = data['KO'] / data['PEP']
+
+# ==========================================
+# 2. 划分数据集
+# ==========================================
+train_data = data.loc['2006-01-01':'2015-12-31'].copy()
+test_data = data.loc['2016-01-01':'2026-06-01'].copy()
+
+# ==========================================
+# 3. 使用 [训练集] 计算历史指标
+# ==========================================
+mean_ratio = train_data['Ratio'].mean()
+train_pct_dev = (train_data['Ratio'] - mean_ratio) / mean_ratio * 100
+std_dev = train_pct_dev.std()
+
+print(f"\n--- 训练集 (2006-2016) 统计指标 ---")
+print(f"历史平均比例 (Mean Ratio): {mean_ratio:.4f}")
+print(f"偏差值的标准差 (Sigma): {std_dev:.2f}%\n")
+
+# 计算 [测试集] 上的每日百分比偏差
+test_data['Pct_Dev'] = (test_data['Ratio'] - mean_ratio) / mean_ratio * 100
+
+# ==========================================
+# 4. 初始化基准与参数
+# ==========================================
+first_day_ko = test_data['KO'].iloc[0]
+first_day_pep = test_data['PEP'].iloc[0]
+initial_capital = 10000.0
+results = {}
+
+# 4.1 计算 [买入持有 (Buy & Hold) 基准]
+bh_values = []
+for _, row in test_data.iterrows():
+    bh_val = (initial_capital * 0.5 / first_day_ko) * row['KO'] + (initial_capital * 0.5 / first_day_pep) * row['PEP']
+    bh_values.append(bh_val)
+results['Buy & Hold'] = bh_values
+
+# ==========================================
+# 5. 阶梯式触发套利回测
+# ==========================================
+# 按照教授白板上的设计，我们定义两级阈值乘数
+t1 = 1.0  # 第一级：轻度失调触发线
+t2 = 2.0  # 第二级：极度失调加码线
+
+threshold_1 = t1 * std_dev
+threshold_2 = t2 * std_dev
+
+# 策略初始化
+cash = 0.0
+ko_shares = (initial_capital * 0.5) / first_day_ko
+pep_shares = (initial_capital * 0.5) / first_day_pep
+
+# trade_status 状态机扩展：
+#  0: 基础持仓 (50/50)
+# -1: 第一级突破(KO贵) -> 持仓变 25/75 (轻度多PEP)
+# -2: 第二级严重突破 -> 持仓变 0/100  (极端全仓PEP)
+#  1: 第一级跌破(PEP贵) -> 持仓变 75/25 (轻度多KO)
+#  2: 第二级严重跌破 -> 持仓变 100/0  (极端全仓KO)
+trade_status = 0 
+
+portfolio_values = []
+trade_count = 0 
+
+for date, row in test_data.iterrows():
+    pct_dev = row['Pct_Dev']
+    ko_price = row['KO']
+    pep_price = row['PEP']
+    
+    # 实时计算当前账户总价值
+    current_val = cash + (ko_shares * ko_price) + (pep_shares * pep_price)
+    portfolio_values.append(current_val)
+    
+    # --- 阶梯状态机核心控制逻辑 ---
+    if trade_status == 0:
+        # 突破正向一级线 -> KO贵了，调仓为 25% KO + 75% PEP
+        if pct_dev >= threshold_1 and pct_dev < threshold_2:
+            trade_status = -1
+            ko_shares = (current_val * 0.25) / ko_price
+            pep_shares = (current_val * 0.75) / pep_price
+            cash = current_val - (ko_shares * ko_price) - (pep_shares * pep_price)
+            trade_count += 1
+        # 强势直接突破二级线 -> 极为罕见，若发生直接跳级全仓 PEP
+        elif pct_dev >= threshold_2:
+            trade_status = -2
+            ko_shares = 0.0
+            pep_shares = current_val / pep_price
+            cash = current_val - (pep_shares * pep_price)
+            trade_count += 1
+            
+        # 跌破负向一级线 -> PEP贵了，调仓为 75% KO + 25% PEP
+        elif pct_dev <= -threshold_1 and pct_dev > -threshold_2:
+            trade_status = 1
+            ko_shares = (current_val * 0.75) / ko_price
+            pep_shares = (current_val * 0.25) / pep_price
+            cash = current_val - (ko_shares * ko_price) - (pep_shares * pep_price)
+            trade_count += 1
+        # 直接跌破二级线 -> 直接跳级全仓 KO
+        elif pct_dev <= -threshold_2:
+            trade_status = 2
+            ko_shares = current_val / ko_price
+            pep_shares = 0.0
+            cash = current_val - (ko_shares * ko_price)
+            trade_count += 1
+
+    elif trade_status == -1:
+        # 情况A：已经在第一级(25/75)，偏差继续恶化冲破二级线 -> 加码全仓 PEP
+        if pct_dev >= threshold_2:
+            trade_status = -2
+            ko_shares = 0.0
+            pep_shares = current_val / pep_price
+            cash = current_val - (pep_shares * pep_price)
+            trade_count += 1
+        # 情况B：开始均值回归，跌回 0 轴以下 -> 获利平仓，恢复 50/50
+        elif pct_dev <= 0:
+            trade_status = 0
+            ko_shares = (current_val * 0.5) / ko_price
+            pep_shares = (current_val * 0.5) / pep_price
+            cash = current_val - (ko_shares * ko_price) - (pep_shares * pep_price)
+
+    elif trade_status == -2:
+        # 已经处于极端全仓 PEP 状态，只能等待它彻底回归 0 轴平仓
+        if pct_dev <= 0:
+            trade_status = 0
+            ko_shares = (current_val * 0.5) / ko_price
+            pep_shares = (current_val * 0.5) / pep_price
+            cash = current_val - (ko_shares * ko_price) - (pep_shares * pep_price)
+
+    elif trade_status == 1:
+        # 情况A：在负向一级，继续恶化跌破二级线 -> 加码全仓 KO
+        if pct_dev <= -threshold_2:
+            trade_status = 2
+            ko_shares = current_val / ko_price
+            pep_shares = 0.0
+            cash = current_val - (ko_shares * ko_price)
+            trade_count += 1
+        # 情况B：向0轴回归，涨回 0 轴以上 -> 平仓恢复 50/50
+        elif pct_dev >= 0:
+            trade_status = 0
+            ko_shares = (current_val * 0.5) / ko_price
+            pep_shares = (current_val * 0.5) / pep_price
+            cash = current_val - (ko_shares * ko_price) - (pep_shares * pep_price)
+
+    elif trade_status == 2:
+        # 已经处于极端全仓 KO 状态，等待彻底回归 0 轴平仓
+        if pct_dev >= 0:
+            trade_status = 0
+            ko_shares = (current_val * 0.5) / ko_price
+            pep_shares = (current_val * 0.5) / pep_price
+            cash = current_val - (ko_shares * ko_price) - (pep_shares * pep_price)
+
+strategy_label = f"Stepped Arbitrage ({t1}σ & {t2}σ)"
+results[strategy_label] = portfolio_values
+
+# ==========================================
+# 6. 输出结果与绘图
+# ==========================================
+final_portfolio_value = portfolio_values[-1]
+final_return = (final_portfolio_value - initial_capital) / initial_capital * 100
+print(f"📈 阶梯式套利策略 | 最终总资产: ${final_portfolio_value:,.2f} | 总收益率: {final_return:.2f}% | 调仓/加仓触发次数: {trade_count} 次")
+
+bh_final_value = bh_values[-1]
+bh_return = (bh_final_value - initial_capital) / initial_capital * 100
+print(f"📊 买入持有基准   | 最终总资产: ${bh_final_value:,.2f} | 总收益率: {bh_return:.2f}%")
+print(f"🏆 阶梯策略 Alpha | {final_return - bh_return:.2f}%")
+
+plt.figure(figsize=(14, 7))
+combined_df = pd.DataFrame(results, index=test_data.index)
+weekly_df = combined_df.resample('W-FRI').last()
+
+plt.plot(weekly_df.index, weekly_df[strategy_label], color='darkblue', linewidth=1.5, label=strategy_label)
+plt.plot(weekly_df.index, weekly_df['Buy & Hold'], color='black', linestyle='--', linewidth=1.5, label='Buy & Hold')
+
+plt.axhline(initial_capital, color='red', linestyle=':', alpha=0.5, label='Initial Capital ($10k)')
+plt.title('Out-of-Sample Test: Stepped Portfolio Arbitrage Strategy (2016 - 2026)', fontsize=13, fontweight='bold')
+plt.xlabel('Date', fontsize=11)
+plt.ylabel('Total Portfolio Value ($)', fontsize=11)
+plt.legend(loc='upper left', fontsize=10)
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
