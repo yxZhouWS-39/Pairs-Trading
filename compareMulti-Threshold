@@ -4,7 +4,7 @@ import numpy as np
 from itertools import combinations
 
 # ==========================================
-# 1. 纯 yfinance 驱动：定义标普500核心核心池
+# 1. 定义标普500核心股票池（共36支）与数据下载
 # ==========================================
 tickers = [
     # 科技与芯片
@@ -17,8 +17,8 @@ tickers = [
     "GE", "CAT", "HON", "BA", "XOM", "CVX", "JNJ", "PFE", "MRK", "UNH"
 ]
 
-# 【修正点】为了能够从 2010-12-31 开始计算皮尔逊相关系数，数据下载起点修改为 2010-01-01
 print(f"🚀 初始化股票池，共 {len(tickers)} 只股票。开始下载 2010-2026 历史数据...")
+# 从 2010-01-01 开始下载以确保有足够的数据计算 2010-12-31 开始的皮尔逊系数及后续滚动窗口
 raw_data = yf.download(tickers, start="2010-01-01", end="2026-06-01", auto_adjust=False)
 price_df = raw_data['Adj Close'].copy()
 
@@ -29,9 +29,8 @@ valid_tickers = price_df.columns.tolist()
 print(f"📊 数据下载清洗完成，有效股票共 {len(valid_tickers)} 只。")
 
 # ==========================================
-# 2. 利用指定时间（2010-12-31 至 2015-12-31）筛选相关系数 > 0.8 的组合
+# 2. 筛选指定时间（2010-12-31 至 2015-12-31）皮尔逊系数 > 0.8 的组合
 # ==========================================
-# 【核心修正点】严格按照要求，使用 2010-12-31 至 2015-12-31 期间的数据进行筛选，且相关系数门槛提升至 0.8
 print("\n🔍 正在计算 2010-12-31 至 2015-12-31 年间的历史皮尔逊相关系数...")
 pre_train_prices = price_df.loc['2010-12-31':'2015-12-31']
 train_returns = pre_train_prices.pct_change().dropna()
@@ -42,24 +41,25 @@ selected_pairs = []
 
 for s1, s2 in pairs:
     r_val = corr_matrix.loc[s1, s2]
-    if r_val >= 0.8:  # 严格筛选大于 0.8
+    if r_val >= 0.8:  # 筛选阈值 > 0.8
         selected_pairs.append((s1, s2, r_val))
 
 print(f"🎯 成功筛选出 {len(selected_pairs)} 组在回测前相关系数 >= 0.8 的股票对。")
-print("开始运行动态 400 天滚动窗口套利模型循环测试...\n")
+print("开始运行【400天滚动窗口 + 多阈值阶梯套利策略】测试...\n")
 
 # ==========================================
-# 3. 循环遍历所有组合，运行【滚动窗口套利回测】
+# 3. 循环遍历所有组合，运行【滚动多阈值回测】
 # ==========================================
 initial_capital = 10000.0
-window = 400   # 【修正点】滚动均值窗口正式由 3 个月调整为 400 天
-m = 2          # 动态阈值系数：保持 2.0σ 触发标准
+window = 400   # 滚动窗口：400天
+t1 = 1.0       # 阈值1：轻度偏离
+t2 = 2.0       # 阈值2：极度偏离
 
 backtest_results = []
 
 for stockA, stockB, corr_score in selected_pairs:
     
-    # --- 3.1 提取并计算两只股票全量时间的 Ratio 滚动指标 ---
+    # --- 3.1 计算两只股票的 Ratio 动态滚动指标 ---
     pair_data = pd.DataFrame(index=price_df.index)
     pair_data['A'] = price_df[stockA]
     pair_data['B'] = price_df[stockB]
@@ -80,9 +80,15 @@ for stockA, stockB, corr_score in selected_pairs:
     cash = 0.0
     shares_A = (initial_capital * 0.5) / first_day_A
     shares_B = (initial_capital * 0.5) / first_day_B
-    trade_status = 0  # 0: 基础持仓(50/50), 1: 多A空B(75/25), -1: 空A多B(25/75)
-    trade_count = 0
     
+    # 状态机定义扩展:
+    #  0: 基础持仓 (50/50)
+    # -1: 突破正向1.0σ (A贵) -> 偏向持仓 25/75 (轻度多B空A)
+    # -2: 突破正向2.0σ (A极贵) -> 极端全仓 0/100 (全仓B)
+    #  1: 跌破负向1.0σ (B贵) -> 偏向持仓 75/25 (轻度多A空B)
+    #  2: 跌破负向2.0σ (B极贵) -> 极端全仓 100/0 (全仓A)
+    trade_status = 0 
+    trade_count = 0
     final_portfolio_val = initial_capital
     
     # --- 3.3 逐日回测状态机循环 ---
@@ -92,7 +98,7 @@ for stockA, stockB, corr_score in selected_pairs:
         price_A = row['A']
         price_B = row['B']
         
-        # 避免回测初期因 400 天滚动数据尚未铺满而出现 NaN 导致计算失效
+        # 排除早期尚未生成滚动指标的交易日
         if pd.isna(pct_dev) or pd.isna(current_std):
             continue
             
@@ -100,62 +106,94 @@ for stockA, stockB, corr_score in selected_pairs:
         current_val = cash + (shares_A * price_A) + (shares_B * price_B)
         final_portfolio_val = current_val
         
-        current_threshold = m * current_std
+        # 动态计算今日的两个阶梯阈值线
+        threshold_1 = t1 * current_std
+        threshold_2 = t2 * current_std
         
-        # 25% / 75% 调仓套利状态机
+        # --- 阶梯控制逻辑核心状态机 ---
         if trade_status == 0:
-            # 突破正向阈值 -> A贵B便宜，减仓A加仓B：25% A + 75% B
-            if pct_dev >= current_threshold:
+            if pct_dev >= threshold_1 and pct_dev < threshold_2:
                 trade_status = -1
                 shares_A = (current_val * 0.25) / price_A
                 shares_B = (current_val * 0.75) / price_B
                 cash = current_val - (shares_A * price_A) - (shares_B * price_B)
                 trade_count += 1
-            # 跌破负向阈值 -> B贵A便宜，减仓B加仓A：75% A + 25% B
-            elif pct_dev <= -current_threshold:
+            elif pct_dev >= threshold_2:
+                trade_status = -2
+                shares_A = 0.0
+                shares_B = current_val / price_B
+                cash = current_val - (shares_B * price_B)
+                trade_count += 1
+            elif pct_dev <= -threshold_1 and pct_dev > -threshold_2:
                 trade_status = 1
                 shares_A = (current_val * 0.75) / price_A
                 shares_B = (current_val * 0.25) / price_B
                 cash = current_val - (shares_A * price_A) - (shares_B * price_B)
                 trade_count += 1
-                
-        elif trade_status == -1:
-            # 回归到 0 轴 -> 恢复 50% / 50% 均等持仓
-            if pct_dev <= 0:
-                shares_A = (current_val * 0.5) / price_A
-                shares_B = (current_val * 0.5) / price_B
-                cash = current_val - (shares_A * price_A) - (shares_B * price_B)
-                trade_status = 0
-                
-        elif trade_status == 1:
-            # 回归到 0 轴 -> 恢复 50% / 50% 均等持仓
-            if pct_dev >= 0:
-                shares_A = (current_val * 0.5) / price_A
-                shares_B = (current_val * 0.5) / price_B
-                cash = current_val - (shares_A * price_A) - (shares_B * price_B)
-                trade_status = 0
+            elif pct_dev <= -threshold_2:
+                trade_status = 2
+                shares_A = current_val / price_A
+                shares_B = 0.0
+                cash = current_val - (shares_A * price_A)
+                trade_count += 1
 
-    # --- 3.4 计算该组合的买入持有（Buy & Hold）基准最终收益率 ---
+        elif trade_status == -1:
+            if pct_dev >= threshold_2:
+                trade_status = -2
+                shares_A = 0.0
+                shares_B = current_val / price_B
+                cash = current_val - (shares_B * price_B)
+                trade_count += 1
+            elif pct_dev <= 0:
+                trade_status = 0
+                shares_A = (current_val * 0.5) / price_A
+                shares_B = (current_val * 0.5) / price_B
+                cash = current_val - (shares_A * price_A) - (shares_B * price_B)
+
+        elif trade_status == -2:
+            if pct_dev <= 0:
+                trade_status = 0
+                shares_A = (current_val * 0.5) / price_A
+                shares_B = (current_val * 0.5) / price_B
+                cash = current_val - (shares_A * price_A) - (shares_B * price_B)
+
+        elif trade_status == 1:
+            if pct_dev <= -threshold_2:
+                trade_status = 2
+                shares_A = current_val / price_A
+                shares_B = 0.0
+                cash = current_val - (shares_A * price_A)
+                trade_count += 1
+            elif pct_dev >= 0:
+                trade_status = 0
+                shares_A = (current_val * 0.5) / price_A
+                shares_B = (current_val * 0.5) / price_B
+                cash = current_val - (shares_A * price_A) - (shares_B * price_B)
+
+        elif trade_status == 2:
+            if pct_dev >= 0:
+                trade_status = 0
+                shares_A = (current_val * 0.5) / price_A
+                shares_B = (current_val * 0.5) / price_B
+                cash = current_val - (shares_A * price_A) - (shares_B * price_B)
+
+    # --- 3.4 计算收益指标与比例 ---
     bh_final_val = (initial_capital * 0.5 / first_day_A) * test_data['A'].iloc[-1] + \
                    (initial_capital * 0.5 / first_day_B) * test_data['B'].iloc[-1]
     
     strategy_return = (final_portfolio_val - initial_capital) / initial_capital * 100
     bh_return = (bh_final_val - initial_capital) / initial_capital * 100
     
-    # 【修正点】将 alpha 计算修改为 策略总收益与 B&H 的比例
-    if bh_return != 0:
-        return_ratio = strategy_return / bh_return
-    else:
-        return_ratio = np.nan
+    # 计算策略与 B&H 的比率
+    return_ratio = strategy_return / bh_return if bh_return != 0 else np.nan
     
-    # 存储测试结果
     backtest_results.append({
         "Stock_1": stockA,
         "Stock_2": stockB,
         "Hist_Corr": round(corr_score, 4),
         "Total_Return(%)": round(strategy_return, 2),
         "B&H_Return(%)": round(bh_return, 2),
-        "Strategy_vs_B&H_Ratio": round(return_ratio, 2) if not np.isnan(return_ratio) else "N/A",
+        "Strategy_vs_B&H_Ratio": round(return_ratio, 2) if not pd.isna(return_ratio) else "N/A",
         "Trade_Count": trade_count
     })
 
@@ -163,8 +201,7 @@ for stockA, stockB, corr_score in selected_pairs:
 # 4. 汇总展现排行榜
 # ==========================================
 results_df = pd.DataFrame(backtest_results)
-# 按照你要求的“策略与B&H比例”从高到低进行最终排序
 results_df = results_df.sort_values(by="Total_Return(%)", ascending=False).reset_index(drop=True)
 
-print("============ 📊 400天动态滚动套利模型扫描排行榜 (2016-2026) ============")
+print("============ 📊 多阈值阶梯套利模型跨资产扫描排行榜 (2016-2026) ============")
 print(results_df.to_string())

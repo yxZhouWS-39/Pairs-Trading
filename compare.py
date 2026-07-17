@@ -4,7 +4,7 @@ import numpy as np
 from itertools import combinations
 
 # ==========================================
-# 1. 纯 yfinance 驱动：定义标普500核心核心池
+# 1. 纯 yfinance 驱动：定义标普500核心池
 # ==========================================
 tickers = [
     # 科技与芯片
@@ -30,33 +30,34 @@ valid_tickers = price_df.columns.tolist()
 print(f"📊 数据下载清洗完成，有效股票共 {len(valid_tickers)} 只。")
 
 # ==========================================
-# 2. 划分数据集 & 在[训练集]中筛选强相关组合
+# 2. 动态划分数据集（计算周期调整为 5 年：2011-2015）
 # ==========================================
-train_prices = price_df.loc['2006-01-01':'2015-12-31'].copy()
+# 【核心修改点】：筛选基准强相关组合时，仅使用 2010-12-31 到 2015-12-31 这 5 年的数据
+train_prices = price_df.loc['2010-12-31':'2015-12-31'].copy()
 test_prices = price_df.loc['2016-01-01':'2026-06-01'].copy()
 
-# 基于训练集的价格计算每日收益率
+# 基于 5 年训练集的价格计算每日收益率
 train_returns = train_prices.pct_change().dropna()
-# 计算皮尔逊相关系数矩阵
+# 计算 5 年周期内的皮尔逊相关系数矩阵
 corr_matrix = train_returns.corr(method='pearson')
 
-# 穷举找出在训练集中相关系数 > 0.7 的股票对
+# 穷举找出在 5 年训练集中相关系数 > 0.7 的股票对
 pairs = list(combinations(valid_tickers, 2))
 selected_pairs = []
 
 for s1, s2 in pairs:
     r_val = corr_matrix.loc[s1, s2]
-    if r_val >= 0.7:
+    if r_val >= 0.8:
         selected_pairs.append((s1, s2, r_val))
 
-print(f"🔍 在2006-2015训练集中，共找出了 {len(selected_pairs)} 组皮尔逊相关系数 > 0.7 的高相关组合。")
+print(f"🔍 在 2011-2015（5年周期）训练集中，共找出了 {len(selected_pairs)} 组皮尔逊相关系数 > 0.7 的高相关组合。")
 print("开始对每个组合跑套利模型循环测试...\n")
 
 # ==========================================
 # 3. 循环遍历所有强相关组合，回测套利模型
 # ==========================================
 initial_capital = 10000.0
-# 设定套利模型的标准差触发阈值（这里统一用 1.0σ，你可以按需修改）
+# 设定套利模型的标准差触发阈值：2.0σ
 m = 2 
 
 backtest_results = []
@@ -136,16 +137,21 @@ for stockA, stockB, corr_score in selected_pairs:
     # 计算收益率
     strategy_return = (final_portfolio_val - initial_capital) / initial_capital * 100
     bh_return = (bh_final_val - initial_capital) / initial_capital * 100
-    alpha = strategy_return - bh_return # 超额收益
+    
+    # 计算策略收益与 B&H 收益的比率
+    if bh_return != 0:
+        return_ratio = strategy_return / bh_return
+    else:
+        return_ratio = np.nan
     
     # 记录该组合的结果
     backtest_results.append({
         "Stock_1": stockA,
         "Stock_2": stockB,
-        "Train_Corr": corr_score,
-        "Strategy_Return(%)": round(strategy_return, 2),
+        "5Y_Train_Corr": corr_score,
+        "Total_Return(%)": round(strategy_return, 2),
         "B&H_Return(%)": round(bh_return, 2),
-        "Alpha(%)": round(alpha, 2),
+        "Strategy_vs_B&H_Ratio": round(return_ratio, 2) if not np.isnan(return_ratio) else "N/A",
         "Trade_Count": trade_count
     })
 
@@ -155,10 +161,7 @@ for stockA, stockB, corr_score in selected_pairs:
 results_df = pd.DataFrame(backtest_results)
 
 # 按照策略收益率从高到低排序
-results_df = results_df.sort_values(by="Strategy_Return(%)", ascending=False).reset_index(drop=True)
+results_df = results_df.sort_values(by="Total_Return(%)", ascending=False).reset_index(drop=True)
 
 print("============ 📊 强相关组合套利回测最终排行榜 (2016-2026) ============")
 print(results_df.to_string())
-
-# 如果你想把结果导出来看，可以取消下面这行的注释：
-# results_df.to_csv("arbitrage_scan_results.csv", index=False)

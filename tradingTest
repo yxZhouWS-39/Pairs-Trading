@@ -1,0 +1,210 @@
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ==========================================
+# 1. 下载数据 (2006 - 2026)
+# ==========================================
+print("正在下载 KO 和 PEP 的数据...")
+tickers = ["KO", "PEP"]
+raw_data = yf.download(tickers, start="2006-01-01", end="2026-06-01", auto_adjust=False)
+data = raw_data['Adj Close'].copy()
+data['Ratio'] = data['KO'] / data['PEP']
+
+# ==========================================
+# 2. 划分数据集与计算基础指标
+# ==========================================
+train_data = data.loc['2006-01-01':'2015-12-31'].copy()
+test_data = data.loc['2016-01-01':'2026-06-01'].copy()
+
+# 2.1 静态指标 (用于策略1和策略3)
+mean_ratio = train_data['Ratio'].mean()
+train_pct_dev = (train_data['Ratio'] - mean_ratio) / mean_ratio * 100
+std_dev = train_pct_dev.std()
+
+test_data['Pct_Dev'] = (test_data['Ratio'] - mean_ratio) / mean_ratio * 100
+
+# 2.2 滚动指标 (用于策略2：400天窗口)
+window = 400
+data['Rolling_Mean'] = data['Ratio'].rolling(window=window).mean()
+data['Rolling_Pct_Dev'] = (data['Ratio'] - data['Rolling_Mean']) / data['Rolling_Mean'] * 100
+data['Rolling_Std'] = data['Rolling_Pct_Dev'].rolling(window=window).std()
+
+test_data['Rolling_Mean'] = data['Rolling_Mean'].loc['2016-01-01':'2026-06-01']
+test_data['Rolling_Pct_Dev'] = data['Rolling_Pct_Dev'].loc['2016-01-01':'2026-06-01']
+test_data['Rolling_Std'] = data['Rolling_Std'].loc['2016-01-01':'2026-06-01']
+
+# ==========================================
+# 3. 计算 Buy & Hold (B&H) 基准每日价值
+# ==========================================
+first_day_ko = test_data['KO'].iloc[0]
+first_day_pep = test_data['PEP'].iloc[0]
+initial_capital = 10000.0
+
+bh_values = []
+for _, row in test_data.iterrows():
+    bh_val = (initial_capital * 0.5 / first_day_ko) * row['KO'] + (initial_capital * 0.5 / first_day_pep) * row['PEP']
+    bh_values.append(bh_val)
+test_data['BH_Value'] = bh_values
+
+print("\n" + "="*50)
+print(" 🚀 开始执行含【资本提取机制】的十年实盘模拟 (2016-2026) ")
+print("="*50)
+
+# 用于画图的字典
+plot_results = {'Buy & Hold': bh_values}
+
+# ==========================================
+# 4. 核心回测逻辑函数 (嵌入提现重启状态机)
+# ==========================================
+def run_backtest_with_cashout(strategy_type, multiplier=None):
+    # 初始化账户
+    cash = 0.0
+    ko_shares = (initial_capital * 0.5) / first_day_ko
+    pep_shares = (initial_capital * 0.5) / first_day_pep
+    trade_status = 0
+    
+    cash_out_income = 0.0  # 累计提取到口袋里的实际个人收入
+    portfolio_values = []  # 记录账户内部的股票+现金总额
+    total_wealth_path = [] # 账户价值 + 已经提现的现金
+    
+    cashout_count = 0
+    trade_count = 0
+    
+    # 策略3的阶梯参数
+    t1, t2 = 1.0, 2.0
+    threshold_1 = t1 * std_dev
+    threshold_2 = t2 * std_dev
+
+    for date, row in test_data.iterrows():
+        ko_price = row['KO']
+        pep_price = row['PEP']
+        bh_val = row['BH_Value']
+        
+        # 1. 实时计算当前账户资产
+        current_account_val = cash + (ko_shares * ko_price) + (pep_shares * pep_price)
+        
+        # 2. 检查是否触发 1.20 倍 B&H 强平提现机制（无限循环支持）
+        if current_account_val / bh_val >= 1.20:
+            extracted_cash = current_account_val - 10000.0
+            if extracted_cash > 0:
+                cash_out_income += extracted_cash
+                cashout_count += 1
+                
+                # 强制平仓所有股票，账户保留精准的10000刀，按50/50重新初始化
+                current_account_val = 10000.0
+                ko_shares = (current_account_val * 0.5) / ko_price
+                pep_shares = (current_account_val * 0.5) / pep_price
+                cash = current_account_val - (ko_shares * ko_price) - (pep_shares * pep_price)
+                trade_status = 0 # 状态机重置
+        
+        portfolio_values.append(current_account_val)
+        total_wealth_path.append(current_account_val + cash_out_income)
+        
+        # 3. 策略逻辑选择
+        if strategy_type == 'fixed':
+            pct_dev = row['Pct_Dev']
+            current_threshold = multiplier * std_dev
+            if trade_status == 0:
+                if pct_dev >= current_threshold:
+                    trade_status = -1; ko_shares = 0.0; pep_shares = current_account_val / pep_price
+                    cash = current_account_val - (pep_shares * pep_price); trade_count += 1
+                elif pct_dev <= -current_threshold:
+                    trade_status = 1; ko_shares = current_account_val / ko_price; pep_shares = 0.0
+                    cash = current_account_val - (ko_shares * ko_price); trade_count += 1
+            elif trade_status == -1 and pct_dev <= 0:
+                ko_shares = (current_account_val * 0.5) / ko_price; pep_shares = (current_account_val * 0.5) / pep_price
+                cash = current_account_val - (ko_shares * ko_price) - (pep_shares * pep_price); trade_status = 0
+            elif trade_status == 1 and pct_dev >= 0:
+                ko_shares = (current_account_val * 0.5) / ko_price; pep_shares = (current_account_val * 0.5) / pep_price
+                cash = current_account_val - (ko_shares * ko_price) - (pep_shares * pep_price); trade_status = 0
+
+        elif strategy_type == 'rolling':
+            pct_dev = row['Rolling_Pct_Dev']
+            current_threshold = multiplier * row['Rolling_Std']
+            if trade_status == 0:
+                if pct_dev >= current_threshold:
+                    trade_status = -1; ko_shares = 0.0; pep_shares = current_account_val / pep_price
+                    cash = current_account_val - (pep_shares * pep_price); trade_count += 1
+                elif pct_dev <= -current_threshold:
+                    trade_status = 1; ko_shares = current_account_val / ko_price; pep_shares = 0.0
+                    cash = current_account_val - (ko_shares * ko_price); trade_count += 1
+            elif trade_status == -1 and pct_dev <= 0:
+                ko_shares = (current_account_val * 0.5) / ko_price; pep_shares = (current_account_val * 0.5) / pep_price
+                cash = current_account_val - (ko_shares * ko_price) - (pep_shares * pep_price); trade_status = 0
+            elif trade_status == 1 and pct_dev >= 0:
+                ko_shares = (current_account_val * 0.5) / ko_price; pep_shares = (current_account_val * 0.5) / pep_price
+                cash = current_account_val - (ko_shares * ko_price) - (pep_shares * pep_price); trade_status = 0
+
+        elif strategy_type == 'stepped':
+            pct_dev = row['Pct_Dev']
+            if trade_status == 0:
+                if threshold_1 <= pct_dev < threshold_2:
+                    trade_status = -1; ko_shares = (current_account_val * 0.25) / ko_price; pep_shares = (current_account_val * 0.75) / pep_price
+                    cash = current_account_val - (ko_shares * ko_price) - (pep_shares * pep_price); trade_count += 1
+                elif pct_dev >= threshold_2:
+                    trade_status = -2; ko_shares = 0.0; pep_shares = current_account_val / pep_price; cash = current_account_val - (pep_shares * pep_price); trade_count += 1
+                elif -threshold_2 < pct_dev <= -threshold_1:
+                    trade_status = 1; ko_shares = (current_account_val * 0.75) / ko_price; pep_shares = (current_account_val * 0.25) / pep_price
+                    cash = current_account_val - (ko_shares * ko_price) - (pep_shares * pep_price); trade_count += 1
+                elif pct_dev <= -threshold_2:
+                    trade_status = 2; ko_shares = current_account_val / ko_price; pep_shares = 0.0; cash = current_account_val - (ko_shares * ko_price); trade_count += 1
+            elif trade_status == -1:
+                if pct_dev >= threshold_2:
+                    trade_status = -2; ko_shares = 0.0; pep_shares = current_account_val / pep_price; cash = current_account_val - (pep_shares * pep_price); trade_count += 1
+                elif pct_dev <= 0:
+                    trade_status = 0; ko_shares = (current_account_val * 0.5) / ko_price; pep_shares = (current_account_val * 0.5) / pep_price; cash = current_account_val - (ko_shares * ko_price) - (pep_shares * pep_price)
+            elif trade_status == -2 and pct_dev <= 0:
+                trade_status = 0; ko_shares = (current_account_val * 0.5) / ko_price; pep_shares = (current_account_val * 0.5) / pep_price; cash = current_account_val - (ko_shares * ko_price) - (pep_shares * pep_price)
+            elif trade_status == 1:
+                if pct_dev <= -threshold_2:
+                    trade_status = 2; ko_shares = current_account_val / ko_price; pep_shares = 0.0; cash = current_account_val - (ko_shares * ko_price); trade_count += 1
+                elif pct_dev >= 0:
+                    trade_status = 0; ko_shares = (current_account_val * 0.5) / ko_price; pep_shares = (current_account_val * 0.5) / pep_price; cash = current_account_val - (ko_shares * ko_price) - (pep_shares * pep_price)
+            elif trade_status == 2 and pct_dev >= 0:
+                trade_status = 0; ko_shares = (current_account_val * 0.5) / ko_price; pep_shares = (current_account_val * 0.5) / pep_price; cash = current_account_val - (ko_shares * ko_price) - (pep_shares * pep_price)
+
+    return total_wealth_path, cash_out_income, cashout_count, trade_count
+
+# ==========================================
+# 5. 执行各组策略的回测并打印报表 (修改为 2.0σ)
+# ==========================================
+# 5.1 运行固定标准差策略 (修改乘数为 2.0)
+fixed_path, fixed_income, fixed_co_cnt, fixed_tr_cnt = run_backtest_with_cashout('fixed', 2.0)
+plot_results['Fixed Arbitrage (2.0σ)'] = fixed_path
+print(f"🔹 策略一 [固定2.0σ] | 累计提取真现金: ${fixed_income:,.2f} | 触发强平提现次数: {fixed_co_cnt} 次 | 换仓轮动次数: {fixed_tr_cnt} 次")
+
+# 5.2 运行滚动窗口标准差策略 (修改乘数为 2.0)
+rolling_path, rolling_income, rolling_co_cnt, rolling_tr_cnt = run_backtest_with_cashout('rolling', 2.0)
+plot_results['Rolling Arbitrage (2.0σ)'] = rolling_path
+print(f"🔄 策略二 [滚动2.0σ] | 累计提取真现金: ${rolling_income:,.2f} | 触发强平提现次数: {rolling_co_cnt} 次 | 换仓轮动次数: {rolling_tr_cnt} 次")
+
+# 5.3 运行阶梯建仓策略
+stepped_path, stepped_income, stepped_co_cnt, stepped_tr_cnt = run_backtest_with_cashout('stepped')
+plot_results['Stepped Arbitrage'] = stepped_path
+print(f"📈 策略三 [阶梯仓位] | 累计提取真现金: ${stepped_income:,.2f} | 触发强平提现次数: {stepped_co_cnt} 次 | 换仓轮动次数: {stepped_tr_cnt} 次")
+
+# 打印买入持有基准
+print(f"📊 被动买入持有(B&H) | 最终资产总价值: ${bh_values[-1]:,.2f} | 期间无法提取任何现金")
+
+# ==========================================
+# 6. 可视化终极全景图
+# ==========================================
+plt.figure(figsize=(14, 7))
+combined_df = pd.DataFrame(plot_results, index=test_data.index)
+weekly_df = combined_df.resample('W-FRI').last()
+
+for label in plot_results.keys():
+    if label == 'Buy & Hold':
+        plt.plot(weekly_df.index, weekly_df[label], color='black', linestyle='--', linewidth=1.8, label=label)
+    else:
+        plt.plot(weekly_df.index, weekly_df[label], linewidth=1.5, label=f"{label} (Account + Extracted Cash)")
+
+plt.title('Panoramic Imperial Test: Strategies with Capital Extraction vs B&H (2016-2026)', fontsize=13, fontweight='bold')
+plt.xlabel('Date', fontsize=11)
+plt.ylabel('Total Cumulative Wealth (Portfolio Value + Realized Personal Income) ($)', fontsize=11)
+plt.legend(loc='upper left', fontsize=10)
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()

@@ -6,7 +6,6 @@ import matplotlib.pyplot as plt
 # 1. 下载数据 (2006 - 2026)
 print("正在下载 KO 和 PEP 的数据...")
 tickers = ["KO", "PEP"]
-# 注意：2026年数据请确保能获取到
 raw_data = yf.download(tickers, start="2006-01-01", end="2026-06-01", auto_adjust=False)
 data = raw_data['Adj Close'].copy()
 
@@ -41,7 +40,6 @@ initial_capital = 10000.0
 # 5.1 计算 [买入持有 (Buy & Hold) 基准] 的每日价值
 bh_values = []
 for _, row in test_data.iterrows():
-    # 初始10000刀，一半买KO，一半买PEP，之后一直持有
     bh_val = (initial_capital * 0.5 / first_day_ko) * row['KO'] + (initial_capital * 0.5 / first_day_pep) * row['PEP']
     bh_values.append(bh_val)
 results['Buy & Hold'] = bh_values
@@ -50,13 +48,9 @@ results['Buy & Hold'] = bh_values
 for m in threshold_multipliers:
     current_threshold = m * std_dev
 
-    # 策略初始化：一开始10000刀，一半买KO，一半买PEP
     cash = 0.0
     ko_shares = (initial_capital * 0.5) / first_day_ko
     pep_shares = (initial_capital * 0.5) / first_day_pep
-
-    # trade_status 状态机:
-    # 0: 基础仓位 (50/50), 1: 全仓 KO (100/0), -1: 全仓 PEP (0/100)
     trade_status = 0
 
     portfolio_values = []
@@ -67,57 +61,101 @@ for m in threshold_multipliers:
         ko_price = row['KO']
         pep_price = row['PEP']
 
-        # 实时计算当前总资产：现金 + 持有KO价值 + 持有PEP价值
         current_val = cash + (ko_shares * ko_price) + (pep_shares * pep_price)
         portfolio_values.append(current_val)
 
-        # 核心全仓轮动逻辑
         if trade_status == 0:
-            # 1. 偏差值过大 -> 说明 KO 相对贵了，PEP 便宜了：卖掉所有 KO，全仓 PEP
             if pct_dev >= current_threshold:
                 trade_status = -1
                 ko_shares = 0.0
                 pep_shares = current_val / pep_price
                 cash = current_val - (pep_shares * pep_price)
                 trade_count += 1
-            # 2. 偏差值负数过于小 -> 说明 PEP 相对贵了，KO 便宜了：卖掉所有 PEP，全仓 KO
             elif pct_dev <= -current_threshold:
                 trade_status = 1
                 ko_shares = current_val / ko_price
                 pep_shares = 0.0
                 cash = current_val - (ko_shares * ko_price)
                 trade_count += 1
-
         elif trade_status == -1:
-            # 之前全仓了 PEP，现在等待偏差值回归 0 (从正数跌回 <= 0)
             if pct_dev <= 0:
-                # 结束交易：用全部资产重新按 50% / 50% 比例购买 KO 和 PEP
                 ko_shares = (current_val * 0.5) / ko_price
                 pep_shares = (current_val * 0.5) / pep_price
                 cash = current_val - (ko_shares * ko_price) - (pep_shares * pep_price)
-                trade_status = 0  # 重新回到等待触发状态
-
+                trade_status = 0 
         elif trade_status == 1:
-            # 之前全仓了 KO，现在等待偏差值回归 0 (从负数涨回 >= 0)
             if pct_dev >= 0:
-                # 结束交易：用全部资产重新按 50% / 50% 比例购买 KO 和 PEP
                 ko_shares = (current_val * 0.5) / ko_price
                 pep_shares = (current_val * 0.5) / pep_price
                 cash = current_val - (ko_shares * ko_price) - (pep_shares * pep_price)
-                trade_status = 0  # 重新回到等待触发状态
+                trade_status = 0 
 
     strategy_label = f"Arbitrage ({m}σ)"
     results[strategy_label] = portfolio_values
 
-    # 结尾计算总资产和总收益率（用最后一天包含全部股票价值的 portfolio_values[-1]）
     final_portfolio_value = portfolio_values[-1]
     final_return = (final_portfolio_value - initial_capital) / initial_capital * 100
     print(f"📈 策略 {m:>.1f}σ 组 | 最终总资产: ${final_portfolio_value:,.2f} | 总收益率: {final_return:.2f}% | 触发交易次数: {trade_count} 次")
 
-# 打印买入持有基准的结果
 bh_final_value = bh_values[-1]
 bh_return = (bh_final_value - initial_capital) / initial_capital * 100
 print(f"📊 买入持有基准 | 最终总资产: ${bh_final_value:,.2f} | 总收益率: {bh_return:.2f}%")
+
+# ==========================================
+# 4.3 基础模型全局零轴穿越分析 (2.0σ 组)
+# ==========================================
+print("\n" + "="*60)
+print("🔍 正在执行验证：基础模型全局零轴穿越审计 (2.0σ)")
+print("="*60)
+
+m_test = 2.0
+base_threshold = m_test * std_dev
+
+in_deviation = False
+deviation_start_idx = None
+direction = 0
+
+all_durations = []
+success_count = 0
+fail_count = 0
+
+for i in range(len(test_data)):
+    pct_dev = test_data['Pct_Dev'].iloc[i]
+    
+    if not in_deviation:
+        if pct_dev >= base_threshold:
+            in_deviation = True
+            deviation_start_idx = i
+            direction = 1
+        elif pct_dev <= -base_threshold:
+            in_deviation = True
+            deviation_start_idx = i
+            direction = -1
+    else:
+        if direction == 1 and pct_dev <= 0:
+            all_durations.append(i - deviation_start_idx)
+            success_count += 1
+            in_deviation = False
+        elif direction == -1 and pct_dev >= 0:
+            all_durations.append(i - deviation_start_idx)
+            success_count += 1
+            in_deviation = False
+
+if in_deviation:
+    fail_count = 1
+
+total_triggers = success_count + fail_count
+reversion_rate = (success_count / total_triggers) * 100 if total_triggers > 0 else 0
+avg_wait_days = np.mean(all_durations) if len(all_durations) > 0 else 0
+
+print(f"1️⃣ 基础模型总计破线爆发次数: {total_triggers} 次")
+print(f"2️⃣ 成功回到零轴的交易次数: {success_count} 次")
+print(f"3️⃣ 全局均值回归成功率: {reversion_rate:.2f}%")
+if success_count > 0:
+    print(f"4️⃣ 成功案例的平均持仓等待期: {avg_wait_days:.1f} 个交易日")
+if fail_count > 0:
+    print(f"⚠️ 风险警示：有 {fail_count} 次交易到 2026 年底仍卡在外面，至死没有回归零轴！")
+print("="*60)
 
 # ==========================================
 # 6. 绘图对比

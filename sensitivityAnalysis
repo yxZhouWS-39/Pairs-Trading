@@ -1,0 +1,181 @@
+import yfinance as yf
+import pandas as pd
+import numpy as np
+
+# ==========================================
+# 1. 数据下载与基础清洗 (2006 - 2026)
+# ==========================================
+print("🚀 开始下载 KO 和 PEP 历史数据...")
+tickers = ["KO", "PEP"]
+raw_data = yf.download(tickers, start="2006-01-01", end="2026-06-01", auto_adjust=False)
+price_df = raw_data['Adj Close'].copy()
+price_df = price_df.ffill().bfill()
+price_df['Ratio'] = price_df['KO'] / price_df['PEP']
+
+# 划分训练集与测试集
+train_prices = price_df.loc['2006-01-01':'2015-12-31'].copy()
+test_prices = price_df.loc['2016-01-01':'2026-06-01'].copy()
+
+# 策略 1 静态指标
+base_mean_ratio = train_prices['Ratio'].mean()
+base_std_dev = ((train_prices['Ratio'] - base_mean_ratio) / base_mean_ratio * 100).std()
+
+# ==========================================
+# 2. 核心性能指标计算函数 (Sharpe, MaxDD)
+# ==========================================
+def calculate_metrics(portfolio_values):
+    """根据每日资产价值序列，计算标准的量化风险收益指标"""
+    ts = pd.Series(portfolio_values)
+    returns = ts.pct_change().dropna()
+    
+    # 1. 年化收益率 (CAGR) - 假设一年 252 个交易日
+    total_days = len(ts)
+    cagr = (ts.iloc[-1] / ts.iloc[0]) ** (252.0 / total_days) - 1
+    
+    # 2. 夏普比率 (Sharpe Ratio) - 假设无风险利率 2%
+    excess_returns = returns - 0.02 / 252
+    sharpe = np.sqrt(252) * excess_returns.mean() / (returns.std() if returns.std() != 0 else 1e-6)
+    
+    # 3. 最大回撤 (Max Drawdown)
+    cum_max = ts.cummax()
+    drawdowns = (ts - cum_max) / cum_max
+    max_dd = drawdowns.min()
+    
+    return cagr * 100, sharpe, max_dd * 100
+
+# ==========================================
+# 3. 敏感性分析网格设定
+# ==========================================
+m_options = [1.0, 1.5, 2.0, 2.5]
+window_options = [200, 300, 400, 500]
+initial_capital = 10000.0
+
+raw_results = []
+
+print(f"📊 启动多维参数空间扫描...")
+
+# ==========================================
+# 4. 统一回测网格搜索循环
+# ==========================================
+for m in m_options:
+    for W in window_options:
+        
+        # 准备滚动数据
+        pair_data = pd.DataFrame(index=price_df.index)
+        pair_data['KO'], pair_data['PEP'] = price_df['KO'], price_df['PEP']
+        pair_data['Ratio'] = pair_data['KO'] / pair_data['PEP']
+        pair_data['Rolling_Mean'] = pair_data['Ratio'].rolling(window=W).mean()
+        pair_data['Rolling_Pct_Dev'] = (pair_data['Ratio'] - pair_data['Rolling_Mean']) / pair_data['Rolling_Mean'] * 100
+        pair_data['Rolling_Std'] = pair_data['Rolling_Pct_Dev'].rolling(window=W).std()
+        
+        test_data = pair_data.loc['2016-01-01':'2026-06-01'].copy()
+        test_data['Base_Pct_Dev'] = (test_data['Ratio'] - base_mean_ratio) / base_mean_ratio * 100
+        
+        first_day_ko, first_day_pep = test_data['KO'].iloc[0], test_data['PEP'].iloc[0]
+        
+        # ----------- 策略 1: 基础固定均值策略 -----------
+        cash_1, status_1, trades_1 = 0.0, 0, 0
+        s_ko_1, s_pep_1 = (initial_capital * 0.5) / first_day_ko, (initial_capital * 0.5) / first_day_pep
+        v_history_1 = []
+        th_1 = m * base_std_dev
+        
+        # ----------- 策略 2: 滚动窗口策略 -----------
+        cash_2, status_2, trades_2 = 0.0, 0, 0
+        s_ko_2, s_pep_2 = (initial_capital * 0.5) / first_day_ko, (initial_capital * 0.5) / first_day_pep
+        v_history_2 = []
+        
+        # ----------- 策略 3: 多阈值阶梯策略 -----------
+        cash_3, status_3, trades_3 = 0.0, 0, 0
+        s_ko_3, s_pep_3 = (initial_capital * 0.5) / first_day_ko, (initial_capital * 0.5) / first_day_pep
+        v_history_3 = []
+        
+        # 逐日回测
+        for date, row in test_data.iterrows():
+            p_ko, p_pep = row['KO'], row['PEP']
+            b_dev = row['Base_Pct_Dev']
+            r_dev = row['Rolling_Pct_Dev']
+            r_std = row['Rolling_Std']
+            
+            # --- 策略 1 净值与逻辑 ---
+            cur_v1 = cash_1 + (s_ko_1 * p_ko) + (s_pep_1 * p_pep)
+            v_history_1.append(cur_v1)
+            if status_1 == 0:
+                if b_dev >= th_1: status_1, s_ko_1, s_pep_1, trades_1 = -1, (cur_v1*0.25)/p_ko, (cur_v1*0.75)/p_pep, trades_1+1; cash_1 = cur_v1 - s_ko_1*p_ko - s_pep_1*p_pep
+                elif b_dev <= -th_1: status_1, s_ko_1, s_pep_1, trades_1 = 1, (cur_v1*0.75)/p_ko, (cur_v1*0.25)/p_pep, trades_1+1; cash_1 = cur_v1 - s_ko_1*p_ko - s_pep_1*p_pep
+            elif (status_1 == -1 and b_dev <= 0) or (status_1 == 1 and b_dev >= 0):
+                status_1, s_ko_1, s_pep_1 = 0, (cur_v1*0.5)/p_ko, (cur_v1*0.5)/p_pep; cash_1 = cur_v1 - s_ko_1*p_ko - s_pep_1*p_pep
+                
+            # --- 策略 2 净值与逻辑 ---
+            cur_v2 = cash_2 + (s_ko_2 * p_ko) + (s_pep_2 * p_pep)
+            v_history_2.append(cur_v2)
+            if not (pd.isna(r_dev) or pd.isna(r_std)):
+                th_2 = m * r_std
+                if status_2 == 0:
+                    if r_dev >= th_2: status_2, s_ko_2, s_pep_2, trades_2 = -1, (cur_v2*0.25)/p_ko, (cur_v2*0.75)/p_pep, trades_2+1; cash_2 = cur_v2 - s_ko_2*p_ko - s_pep_2*p_pep
+                    elif r_dev <= -th_2: status_2, s_ko_2, s_pep_2, trades_2 = 1, (cur_v2*0.75)/p_ko, (cur_v2*0.25)/p_pep, trades_2+1; cash_2 = cur_v2 - s_ko_2*p_ko - s_pep_2*p_pep
+                elif (status_2 == -1 and r_dev <= 0) or (status_2 == 1 and r_dev >= 0):
+                    status_2, s_ko_2, s_pep_2 = 0, (cur_v2*0.5)/p_ko, (cur_v2*0.5)/p_pep; cash_2 = cur_v2 - s_ko_2*p_ko - s_pep_2*p_pep
+                    
+            # --- 策略 3 净值与逻辑 ---
+            cur_v3 = cash_3 + (s_ko_3 * p_ko) + (s_pep_3 * p_pep)
+            v_history_3.append(cur_v3)
+            if not (pd.isna(r_dev) or pd.isna(r_std)):
+                t1_l, t2_l = m * r_std, m * 2.0 * r_std
+                if status_3 == 0:
+                    if t1_l <= r_dev < t2_l: status_3, s_ko_3, s_pep_3, trades_3 = -1, (cur_v3*0.25)/p_ko, (cur_v3*0.75)/p_pep, trades_3+1; cash_3 = cur_v3 - s_ko_3*p_ko - s_pep_3*p_pep
+                    elif r_dev >= t2_l: status_3, s_ko_3, s_pep_3, trades_3 = -2, 0.0, cur_v3/p_pep, trades_3+1; cash_3 = cur_v3 - s_pep_3*p_pep
+                    elif -t2_l < r_dev <= -t1_l: status_3, s_ko_3, s_pep_3, trades_3 = 1, (cur_v3*0.75)/p_ko, (cur_v3*0.25)/p_pep, trades_3+1; cash_3 = cur_v3 - s_ko_3*p_ko - s_pep_3*p_pep
+                    elif r_dev <= -t2_l: status_3, s_ko_3, s_pep_3, trades_3 = 2, cur_v3/p_ko, 0.0, trades_3+1; cash_3 = cur_v3 - s_ko_3*p_ko
+                elif status_3 == -1:
+                    if r_dev >= t2_l: status_3, s_ko_3, s_pep_3, trades_3 = -2, 0.0, cur_v3/p_pep, trades_3+1; cash_3 = cur_v3 - s_pep_3*p_pep
+                    elif r_dev <= 0: status_3, s_ko_3, s_pep_3 = 0, (cur_v3*0.5)/p_ko, (cur_v3*0.5)/p_pep; cash_3 = cur_v3 - s_ko_3*p_ko - s_pep_3*p_pep
+                elif status_3 == -2 and r_dev <= 0: status_3, s_ko_3, s_pep_3 = 0, (cur_v3*0.5)/p_ko, (cur_v3*0.5)/p_pep; cash_3 = cur_v3 - s_ko_3*p_ko - s_pep_3*p_pep
+                elif status_3 == 1:
+                    if r_dev <= -t2_l: status_3, s_ko_3, s_pep_3, trades_3 = 2, cur_v3/p_ko, 0.0, trades_3+1; cash_3 = cur_v3 - s_ko_3*p_ko
+                    elif r_dev >= 0: status_3, s_ko_3, s_pep_3 = 0, (cur_v3*0.5)/p_ko, (cur_v3*0.5)/p_pep; cash_3 = cur_v3 - s_ko_3*p_ko - s_pep_3*p_pep
+                elif status_3 == 2 and r_dev >= 0: status_3, s_ko_3, s_pep_3 = 0, (cur_v3*0.5)/p_ko, (cur_v3*0.5)/p_pep; cash_3 = cur_v3 - s_ko_3*p_ko - s_pep_3*p_pep
+
+        # 计算多维指标
+        cagr1, sharpe1, maxdd1 = calculate_metrics(v_history_1)
+        cagr2, sharpe2, maxdd2 = calculate_metrics(v_history_2)
+        cagr3, sharpe3, maxdd3 = calculate_metrics(v_history_3)
+        
+        raw_results.append({
+            "m": m, "W": W,
+            "S1_CAGR": cagr1, "S1_Sharpe": sharpe1, "S1_MaxDD": maxdd1, "S1_Trades": trades_1,
+            "S2_CAGR": cagr2, "S2_Sharpe": sharpe2, "S2_MaxDD": maxdd2, "S2_Trades": trades_2,
+            "S3_CAGR": cagr3, "S3_Sharpe": sharpe3, "S3_MaxDD": maxdd3, "S3_Trades": trades_3
+        })
+
+df_res = pd.DataFrame(raw_results)
+
+# ==========================================
+# 5. 正经敏感性统计学分析 (Statistical Summary)
+# ==========================================
+print("\n" + "="*90)
+print("📈                    第一步：完整多维敏感性扫描结果大表                           ")
+print("="*90)
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', 1000)
+print(df_res.round(2).to_string(index=False))
+
+print("\n" + "="*90)
+print("🔬                    第二步：统计学规律与波动偏离度分析 (规律提炼)                 ")
+print("="*90)
+
+for s_idx, name in [(1, "Baseline 1"), (2, "Rolling 2"), (3, "Stepped 3")]:
+    cagr_col = f"S{s_idx}_CAGR"
+    sharpe_col = f"S{s_idx}_Sharpe"
+    dd_col = f"S{s_idx}_MaxDD"
+    trade_col = f"S{s_idx}_Trades"
+    
+    print(f"\n【策略 {name}】参数空间内的统计学分布：")
+    print(f"  · 年化收益率 (CAGR)  :: 均值 = {df_res[cagr_col].mean():.2f}%, 标准差(波动度) = {df_res[cagr_col].std():.2f}%")
+    print(f"  · 夏普比率 (Sharpe)  :: 均值 = {df_res[sharpe_col].mean():.2f} , 标准差(波动度) = {df_res[sharpe_col].std():.2f}")
+    print(f"  · 最大回撤 (MaxDD)   :: 均值 = {df_res[dd_col].mean():.2f}%, 标准差(波动度) = {df_res[dd_col].std():.2f}%")
+    print(f"  · 交易次数 (Trades)  :: 范围 = [{df_res[trade_col].min()}, {df_res[trade_col].max()}] 次")
+    
+    # 计算参数敏感度偏导数 (Slope / 梯度估计)
+    # 计算开仓阈值 m 变动对 夏普比率的平均影响斜率
+    m_slope = df_res.groupby('m')[sharpe_col].mean().pct_change().dropna().mean()
+    print(f"  · ⚠️ 敏感度敏感偏导 (dSharpe/dm):: 阈值每提高一个阶梯，夏普比率平均变动幅度: {m_slope*100:.2f}%")
